@@ -14,15 +14,15 @@ Baseline = rc.1 defaults: `tools` standard, `tools_mode` native, no `fanout`. Me
 
 ## 2. The provider-layer timeout/retry trap (fan-out root cause)
 
-Condition: applied identically to the fast/planning/long-context tier providers; the longest single generation measured was ~200 s (the checker, planning tier, thinking on).
+Condition: applied identically to the fast/planning/long-context tier providers; the longest single generation measured was ~200 s (the checker, planning tier, thinking on). These values were sufficient for generations whose first token arrived within seconds. They are not sufficient when the first token takes more than 300 s; see section 6 (added 2026-10).
 
 | Item | Value |
 |---|---|
-| pi-ai provider-layer defaults | timeout 60 s, retries 5 — a single generation over the default was judged failed and silently retried 5×; this was the first true root cause of the two early fan-out timeouts |
+| pi-ai provider-layer defaults | Early-run attribution: timeout 60 s, retries 5 — a single generation over the default was judged failed and silently retried 5×; originally diagnosed as the cause of the two early fan-out timeouts. Caveat added 2026-10: the client-library request timer behind `timeoutMs` stops once the response headers arrive, so it bounds the wait for headers, not the duration of a stream that has started. The mechanism by which a streaming generation longer than 60 s was cut in the early runs was not re-verified. |
 | Longest single generation actually measured | ~200 s (the checker, planning tier, thinking on) |
-| Final policy (applied identically to the fast/planning/long-context tier providers) | `timeoutMs: 600000`, `retryPolicy.maxRetries: 1`; rule: the total time for a call (timeout × (1 + retries) plus backoff and overhead) must stay clearly smaller than the packet wall; multiple calls in one packet need their budget summed |
+| Policy used in these runs (short time-to-first-token) | `timeoutMs: 600000`, `retryPolicy.maxRetries: 1`; rule used in those runs: the total time for a call (timeout × (1 + retries) plus backoff and overhead) must stay clearly smaller than the packet wall; multiple calls in one packet need their budget summed. The rule is incomplete: timeout × (1 + retries) bounds only the wait for response headers, not a stream in progress. Two other idle timers (a 300 s semantic stream-idle watchdog and a 300 s transport body-idle timeout) also have to be set above the longest silent gap you expect, and all of them must stay below the job wall. See [Update (2026-10)](../README.md#update-2026-10). |
 | Iteration note | first version set 900 s; a review caught that 900×2 would collide with the wrapper's default wall of 1800 s (600×2=1200 stays below), so it was lowered to 600 s |
-| Real hangs | handled by the wrapper's wall timeout (exit 124), not by provider-layer retries |
+| Real hangs | Real hangs that produce no streamed content for 300 s are cut earlier by the stream-idle watchdog (default 300 s) and surface as a provider timeout error, not as exit 124. Exit 124 applies when the stream keeps producing content but the job exceeds its wall. This watchdog behavior is supported by source reading and a scaled-down reproduction, not a 300 s run; which idle timer fires first through the full path remains open. |
 | Rollback | `git checkout` the three per-profile provider config files restores the old default pair |
 
 ## 3. GC retention
@@ -59,7 +59,13 @@ Condition: each negative result referenced to its table above; no thresholds wer
 |---|---|
 | ptc correctness advantage (native 9/12 vs ptc 11/12 collapses to a tie on the last 8 rounds) while median token and wall costs rise | §1 |
 | fan-out as a wall-time saver on small tasks on a single local endpoint (and its token blow-up) | §1 |
-| The first two fan-out runs (provider-layer timeout + silent retry storm) | §2 |
+| The first two fan-out runs (early attribution: provider-layer timeout + silent retry storm; exact cutoff mechanism open) | §2 |
 | The initial 900 s timeout value (would collide with the wrapper wall) | §2 |
 | 15-book audit under every parallelism setting (max-tokens / timeout, zero coverage) | §4 |
 | Any threshold generalization from the ladder — explicitly declined for lack of data | §4 |
+
+## 6. Timeout stack update (2026-10)
+
+Condition: the original policy above covers short time-to-first-token. Later source reading, scaled-down reproductions and the **2026-09-25** transport probes distinguish the request timer, semantic idle watchdog, transport header/body timers and job wall. The dated tables, exact configuration values and evidence labels are in [Update (2026-10)](../README.md#update-2026-10); the original knob measurements above are unchanged.
+
+Acceptance of the later long-context change **did not fully pass**: no full-path request exercised a silent gap over **300 s**; the strict response-model check failed because the gateway returned a route alias; and no request near the full advertised context window was run. Observed dispatcher settings and the historical **34/34** unit suite verify configuration, not those missing acceptance cases. All other open items, including gateway limits, retry behavior and dry-run-only rollback, remain explicit in the update.
